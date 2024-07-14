@@ -12,12 +12,14 @@
 #include <condition_variable>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 
 using namespace std;
 using namespace sf;
 using namespace Eigen;
 using namespace tiny_dnn;
 using namespace tiny_dnn::layers;
+using namespace std::chrono;
 
 constexpr int SCREEN_WIDTH = 800;
 constexpr int SCREEN_HEIGHT = 600;
@@ -26,10 +28,13 @@ const sf::Color AGENT_COLOR = sf::Color(0, 0, 255);
 const sf::Color FOOD_COLOR = sf::Color(0, 255, 0);
 constexpr int AGENT_SIZE = 10;
 constexpr int FOOD_SIZE = 5;
+constexpr int MATURITY_TIME = 60; // in seconds
+constexpr int MAX_AGE = 180; // in seconds
 
 mutex mtx;
 condition_variable cv;
 priority_queue<pair<int, function<void()>>> taskQueue;
+mutex agentsMutex;
 
 struct Food {
     sf::Vector2f position;
@@ -41,6 +46,7 @@ struct Food {
         shape.setFillColor(FOOD_COLOR);
         shape.setPosition(position.x, position.y);
         window.draw(shape);
+        cout << "Drawing food at position: " << position.x << ", " << position.y << endl;
     }
 };
 
@@ -69,12 +75,17 @@ public:
     atomic<float> energy;
     bool alive = true;
     float stress = 0;
+    time_point<steady_clock> birthTime;
+    time_point<steady_clock> lastReproduceTime;
 
-    Agent(string n, float x, float y, float e) : name(std::move(n)), position(x, y), direction(1, 0), energy(e) {}
+    Agent(string n, float x, float y, float e) : name(std::move(n)), position(x, y), direction(1, 0), energy(e) {
+        birthTime = steady_clock::now();
+        lastReproduceTime = birthTime;
+    }
 
     Agent(Agent&& other) noexcept 
         : name(std::move(other.name)), position(other.position), direction(other.direction), tasks(std::move(other.tasks)), 
-          energy(other.energy.load()), alive(other.alive), stress(other.stress) {}
+          energy(other.energy.load()), alive(other.alive), stress(other.stress), birthTime(other.birthTime), lastReproduceTime(other.lastReproduceTime) {}
 
     Agent& operator=(Agent&& other) noexcept {
         if (this != &other) {
@@ -85,6 +96,8 @@ public:
             energy.store(other.energy.load());
             alive = other.alive;
             stress = other.stress;
+            birthTime = other.birthTime;
+            lastReproduceTime = other.lastReproduceTime;
         }
         return *this;
     }
@@ -93,23 +106,34 @@ public:
         lock_guard<mutex> lock(mtx);
         tasks.push(task);
         cv.notify_all();
+        cout << "Task added: " << task.name << " with priority " << task.priority << endl;
     }
 
     void processTasks() {
         while (alive) {
             unique_lock<mutex> lock(mtx);
-            cv.wait(lock, [this] { return !tasks.empty() || !alive; });
+            if (tasks.empty()) {
+                cout << "No tasks to process for agent: " << name << endl;
+                return;
+            }
 
-            while (!tasks.empty() && alive) {
-                Task task = tasks.top();
-                tasks.pop();
-                lock.unlock();
-                if (energy >= task.complexity) {
+            Task task = tasks.top();
+            tasks.pop();
+            cout << "Popped task: " << task.name << " with priority " << task.priority << endl;
+            lock.unlock();
+            if (energy >= task.complexity) {
+                cout << "Executing task: " << task.name << " with priority " << task.priority << endl;
+                try {
                     task.action();
-                    float currentEnergy = energy.load();
-                    energy.store(currentEnergy - task.complexity);
+                } catch (const std::exception& e) {
+                    cout << "Exception in task action: " << e.what() << endl;
+                } catch (...) {
+                    cout << "Unknown exception in task action" << endl;
                 }
-                lock.lock();
+                float currentEnergy = energy.load();
+                energy.store(currentEnergy - task.complexity);
+            } else {
+                cout << "Not enough energy for task: " << task.name << endl;
             }
         }
     }
@@ -124,9 +148,11 @@ public:
         shape.setFillColor(AGENT_COLOR);
         shape.setPosition(position.x, position.y);
         window.draw(shape);
+        cout << "Drawing agent " << name << " at position: " << position.x << ", " << position.y << endl;
     }
 
     void moveAgent() {
+        cout << "moveAgent called" << endl; // Debug statement
         random_device rd;
         mt19937 gen(rd());
         uniform_int_distribution<> dist(-1, 1);
@@ -138,15 +164,31 @@ public:
     }
 
     void stayPut() {
+        cout << "stayPut called" << endl; // Debug statement
         cout << name << " is staying put." << endl;
     }
 
     void reproduce(vector<Agent>& agents) {
-        if (energy > 50) {
-            agents.emplace_back(name + "_child", position.x, position.y, 50);
-            float currentEnergy = energy.load();
-            energy.store(currentEnergy - 50);
-            cout << name << " has reproduced." << endl;
+        cout << "reproduce called" << endl; // Debug statement
+        auto now = steady_clock::now();
+        auto age = chrono::duration_cast<chrono::seconds>(now - birthTime).count();
+        auto timeSinceLastReproduce = chrono::duration_cast<chrono::seconds>(now - lastReproduceTime).count();
+
+        if (age >= MATURITY_TIME && timeSinceLastReproduce >= MATURITY_TIME && energy > 50) {
+            lock_guard<mutex> lock(agentsMutex);  // Lock the agents vector
+            try {
+                cout << "Before adding new agent" << endl;
+                agents.emplace_back(name + "_child", position.x, position.y, 50);
+                cout << "After adding new agent" << endl;
+                float currentEnergy = energy.load();
+                energy.store(currentEnergy - 50);
+                lastReproduceTime = now;
+                cout << name << " has reproduced." << endl;
+            } catch (const std::exception& e) {
+                cout << "Exception in reproduce: " << e.what() << endl;
+            } catch (...) {
+                cout << "Unknown exception in reproduce" << endl;
+            }
         }
     }
 
@@ -157,6 +199,7 @@ public:
     }
 
     void vision(const vector<Food>& foods) {
+        cout << "vision called" << endl; // Debug statement
         float visionRange = 50;
         float visionAngle = M_PI / 4;
         for (const auto& food : foods) {
@@ -176,6 +219,7 @@ public:
     }
 
     void hearing(const vector<Agent>& agents) {
+        cout << "hearing called" << endl; // Debug statement
         float hearingRange = 100;
         for (const auto& agent : agents) {
             if (this != &agent) {
@@ -189,6 +233,7 @@ public:
     }
 
     void touch(const vector<Agent>& agents) {
+        cout << "touch called" << endl; // Debug statement
         for (const auto& agent : agents) {
             if (this != &agent) {
                 float distance = sqrt((position.x - agent.position.x) * (position.x - agent.position.x) +
@@ -202,12 +247,16 @@ public:
     }
 
     void decideNextAction(vector<Agent>& agents, network<sequential>& net) {
+        cout << "decideNextAction called" << endl; // Debug statement
         random_device rd;
         mt19937 gen(rd());
         uniform_real_distribution<> dis(0.1, 0.5);
 
         vector<function<void()>> actions = {bind(&Agent::moveAgent, this), bind(&Agent::stayPut, this)};
-        if (energy > 50) {
+        auto now = steady_clock::now();
+        auto age = chrono::duration_cast<chrono::seconds>(now - birthTime).count();
+
+        if (age >= MATURITY_TIME && energy > 50) {
             actions.push_back(bind(&Agent::reproduce, this, ref(agents)));
         }
 
@@ -215,17 +264,20 @@ public:
             float priority = predictPriority(net, getRealTimeData()) - float(stress);
             addTask(Task("Action", priority, dis(gen), action));
         }
+
+        if (age >= MAX_AGE) {
+            alive = false;
+            cout << name << " has reached maximum age and died." << endl;
+        }
     }
 
     void update(const vector<Food>& foods, vector<Agent>& agents, network<sequential>& net) {
         if (alive) {
+            cout << "Updating agent: " << name << endl;
             senseEnvironment(foods, agents);
             decideNextAction(agents, net);
+            cout << "Processing tasks for agent: " << name << endl;
             processTasks();
-            if (energy <= 0) {
-                alive = false;
-                cout << name << " has died." << endl;
-            }
         }
     }
 };
@@ -246,7 +298,6 @@ Vector4f getRealTimeData() {
     return data;
 }
 
-
 float predictPriority(network<sequential>& net, const Vector4f& data) {
     vec_t input = {data[0], data[1], data[2], data[3]};
     return net.predict(input)[0];
@@ -258,12 +309,14 @@ network<sequential> net;
 
 void initializeSimulation() {
     net = setupNeuralNetwork();
+    agents.reserve(100); // Preallocate space to avoid reallocation
     agents.emplace_back("Agent1", 400, 300, 100);
     foods.emplace_back(100, 100);
 
-    for (auto& agent : agents) {
-        agent.simulateLife();
-    }
+    // Comment out threading for now
+    // for (auto& agent : agents) {
+    //     agent.simulateLife();
+    // }
 }
 
 void runSimulation() {
@@ -271,6 +324,7 @@ void runSimulation() {
     window.setFramerateLimit(60);
 
     initializeSimulation();
+    cout << "Simulation initialized" << endl;
 
     while (window.isOpen()) {
         Event event;
@@ -285,16 +339,22 @@ void runSimulation() {
             food.draw(window);
         }
 
-        for (auto& agent : agents) {
-            agent.update(foods, agents, net);
-            agent.draw(window);
+        {
+            lock_guard<mutex> lock(agentsMutex); // Lock the agents vector during the draw call
+            for (auto& agent : agents) {
+                cout << "Updating and drawing agent: " << agent.name << endl; // Debug statement
+                agent.update(foods, agents, net);
+                agent.draw(window);
+            }
         }
 
         window.display();
+        cout << "Window updated and displayed" << endl;
     }
 }
 
 int main() {
+    cout << "Starting simulation" << endl;
     runSimulation();
     return 0;
 }
