@@ -28,7 +28,7 @@ const sf::Color AGENT_COLOR = sf::Color(0, 0, 255);
 const sf::Color FOOD_COLOR = sf::Color(0, 255, 0);
 constexpr int AGENT_SIZE = 10;
 constexpr int FOOD_SIZE = 5;
-constexpr int MATURITY_TIME = 60; // in seconds
+constexpr int MATURITY_TIME = 10; // in seconds
 constexpr int MAX_AGE = 180; // in seconds
 constexpr int NUM_FOOD_ITEMS = 1000; // Number of food items to add
 
@@ -82,7 +82,9 @@ public:
     Agent(string n, float x, float y, float e) : name(std::move(n)), position(x, y), direction(1, 0), energy(e) {
         birthTime = steady_clock::now();
         lastReproduceTime = birthTime;
+        cout << "Agent " << name << " created at position (" << x << ", " << y << ") with energy " << e << endl; // Debug statement
     }
+
 
     Agent(Agent&& other) noexcept 
         : name(std::move(other.name)), position(other.position), direction(other.direction), tasks(std::move(other.tasks)), 
@@ -175,20 +177,42 @@ public:
         auto age = chrono::duration_cast<chrono::seconds>(now - birthTime).count();
         auto timeSinceLastReproduce = chrono::duration_cast<chrono::seconds>(now - lastReproduceTime).count();
 
+        cout << "Agent age: " << age << " seconds" << endl;
+        cout << "Time since last reproduce: " << timeSinceLastReproduce << " seconds" << endl;
+        cout << "Agent energy: " << energy.load() << endl;
+
         if (age >= MATURITY_TIME && timeSinceLastReproduce >= MATURITY_TIME && energy > 50) {
-            lock_guard<mutex> lock(agentsMutex);  // Lock the agents vector
+            cout << "Conditions met for reproduction" << endl;
+
+            string childName = name + "_child";
+            float childX = position.x;
+            float childY = position.y;
+            float childEnergy = 50;
+
+            cout << "Creating new agent with name: " << childName << ", position: (" << childX << ", " << childY << "), energy: " << childEnergy << endl;
+
             try {
-                cout << "Before adding new agent" << endl;
-                agents.emplace_back(name + "_child", position.x, position.y, 50);
-                cout << "After adding new agent" << endl;
-                float currentEnergy = energy.load();
-                energy.store(currentEnergy - 50);
-                lastReproduceTime = now;
-                cout << name << " has reproduced." << endl;
+                agents.push_back(Agent(childName, childX, childY, childEnergy));
+                cout << "New agent added" << endl;
             } catch (const std::exception& e) {
                 cout << "Exception in reproduce: " << e.what() << endl;
             } catch (...) {
                 cout << "Unknown exception in reproduce" << endl;
+            }
+
+            float currentEnergy = energy.load();
+            energy.store(currentEnergy - 50);
+            lastReproduceTime = now;
+            cout << name << " has reproduced." << endl;
+        } else {
+            if (age < MATURITY_TIME) {
+                cout << "Agent not mature enough to reproduce." << endl;
+            }
+            if (timeSinceLastReproduce < MATURITY_TIME) {
+                cout << "Not enough time since last reproduce." << endl;
+            }
+            if (energy <= 50) {
+                cout << "Not enough energy to reproduce." << endl;
             }
         }
     }
@@ -310,7 +334,7 @@ network<sequential> net;
 
 void initializeSimulation() {
     net = setupNeuralNetwork();
-    agents.reserve(100); // Preallocate space to avoid reallocation
+    agents.reserve(10000); // Preallocate space to avoid reallocation
     agents.emplace_back("Agent1", 400, 300, 100);
 
     // Generate random food items
