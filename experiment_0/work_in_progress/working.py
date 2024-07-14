@@ -45,28 +45,34 @@ class Task:
             print(f"Insufficient energy to process {self.name}")
         return self.agent and self.agent.energy > 0
 
+
     def __lt__(self, other):
         """Define a less-than method to compare tasks based on priority."""
         return self.priority < other.priority
 
 class Agent:
-    def __init__(self, name, x, y, start_energy=200):  # Increased initial energy
+    def __init__(self, name, x, y, start_energy=200):
         self.name = name
         self.position = np.array([x, y])
-        self.direction = np.array([1, 0])  # Initial direction (right)
+        self.direction = np.array([1, 0])
         self.task_queue = queue.PriorityQueue()
         self.energy = start_energy
-        self.memory = []
+        self.memory = {}
         self.alive = True
         self.stress = 0
 
-    def add_task(self, task):
-        self.task_queue.put(task)
-
     def process_tasks(self):
+        """Process tasks, ensuring energy is never negative."""
         while not self.task_queue.empty() and self.energy > 0:
             _, task = self.task_queue.get()
-            task.process()
+            if self.energy >= task.complexity:  # Additional check to prevent processing when energy is insufficient
+                task.process()
+            else:
+                print(f"Skipped {task.name} due to insufficient energy.")
+                break  # Break the loop if energy is too low for the next task
+
+    def add_task(self, task):
+        self.task_queue.put(task)
 
     def update(self, food_items, agents):
         if self.alive:
@@ -209,16 +215,16 @@ def predict_priority(environmental_data):
     ]
     return priority_model.predict(data)[0][0]
 
-def add_tasks_to_queue(q, context):
-    """Populate the priority queue with tasks based on the provided context and predicted priorities."""
+def add_tasks_to_queue(q, context, agent):
+    """Populate the priority queue with tasks based on the provided context and predicted priorities, ensuring tasks are feasible given current energy."""
     real_time_data = get_real_time_data()
     num_tasks = 30 if context == 'high_stress' else 15
-    complexities = [random.uniform(1, 3) if context == 'high_stress' else random.uniform(0.5, 1.5) for _ in range(num_tasks)]
+    base_complexity = agent.energy * 0.1  # Ensuring that no single task exceeds 10% of the current energy
 
     for i in range(num_tasks):
         predicted_priority = predict_priority(real_time_data) * 10  # Scale the priority
-        complexity = complexities[i]
-        task = Task(f"Task-{i}", predicted_priority, complexity)
+        complexity = random.uniform(0.1, base_complexity)  # Adjusted to be within a feasible range
+        task = Task(f"Task-{i}", predicted_priority, complexity, None, agent)
         q.put((task.priority, task))
 
 def process_tasks_from_queue(q):
@@ -237,7 +243,12 @@ def process_tasks_from_queue(q):
 def evaluate_strategy(num_workers, context):
     """Evaluate a strategy based on the number of workers and context."""
     pq = queue.PriorityQueue()
-    add_tasks_to_queue(pq, context)
+
+    # Create a generic agent for strategy evaluation
+    generic_agent = Agent("Generic_Agent", 400, 300, start_energy=200)
+
+    # Add tasks to the priority queue with the context and a generic agent
+    add_tasks_to_queue(pq, context, generic_agent)
 
     start_time = time.time()
     threads = []
@@ -251,6 +262,7 @@ def evaluate_strategy(num_workers, context):
     total_time = time.time() - start_time
     reflect_on_performance(total_time)
     return total_time
+
 
 def genetic_algorithm(population, context, generations=10):
     """Genetic algorithm to evolve the number of worker threads."""
@@ -296,7 +308,7 @@ def run_simulation():
     running = True
     while running:
         for event in pygame.event.get():
-            if event.type == pygame.QUIT:
+            if event.type is pygame.QUIT:
                 running = False
 
         screen.fill(BACKGROUND_COLOR)
@@ -308,6 +320,8 @@ def run_simulation():
         for agent in all_agents:
             agent.update(food_items, all_agents)
             if agent.alive:
+                add_tasks_to_queue(agent.task_queue, 'normal', agent)  # Dynamically add tasks based on current context and energy
+                agent.process_tasks()
                 agent.draw()
                 alive_agents.append(agent)
         all_agents = alive_agents
