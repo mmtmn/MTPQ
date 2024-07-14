@@ -50,7 +50,7 @@ class Task:
         return self.priority < other.priority
 
 class Agent:
-    def __init__(self, name, x, y, start_energy=100):
+    def __init__(self, name, x, y, start_energy=200):  # Increased initial energy
         self.name = name
         self.position = np.array([x, y])
         self.direction = np.array([1, 0])  # Initial direction (right)
@@ -98,7 +98,8 @@ class Agent:
         self.touch(agents)
 
         data = get_real_time_data()
-        self.stress = data['stress']  # Update stress from environment
+        stress_mapping = {'high': 1.0, 'medium': 0.5, 'low': 0.0}
+        self.stress = stress_mapping[data['stress']]  # Convert stress to numerical value
         priority = predict_priority(data)
         complexity = random.uniform(0.1, 0.5)
         task = Task("Sense Environment", priority, complexity, self.action, self)
@@ -148,8 +149,8 @@ class Agent:
             action_names.append("Reproduce")
 
         for action, action_name in zip(actions, action_names):
-            priority = predict_priority(real_time_data) - self.stress  # Stress decreases priority
-            complexity = random.uniform(0.5, 1.5)
+            priority = predict_priority(real_time_data) - float(self.stress)  # Ensure stress is float
+            complexity = random.uniform(0.1, 0.5)  # Reduced complexity
             task = Task(action_name, priority, complexity, action, self)
             self.add_task(task)
 
