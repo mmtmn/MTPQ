@@ -5,6 +5,7 @@ import time
 import numpy as np
 from tensorflow.keras.models import Sequential, Model
 from tensorflow.keras.layers import Dense, Input, Concatenate
+from tensorflow.keras.callbacks import ModelCheckpoint
 
 class Task:
     """A task class with name, priority, complexity, and influenced by environmental data."""
@@ -40,17 +41,16 @@ def create_multisensory_model():
     tactile_input = Input(shape=(1,))
     stress_input = Input(shape=(1,))
 
-    # Pathways for different inputs
-    visual_path = Dense(10, activation='relu')(visual_input)
-    auditory_path = Dense(10, activation='relu')(auditory_input)
-    tactile_path = Dense(10, activation='relu')(tactile_input)
-    stress_path = Dense(10, activation='relu')(stress_input)
+    # Enhanced pathways for different inputs
+    visual_path = Dense(20, activation='relu')(visual_input)
+    auditory_path = Dense(20, activation='relu')(auditory_input)
+    tactile_path = Dense(20, activation='relu')(tactile_input)
+    stress_path = Dense(20, activation='relu')(stress_input)
 
-    # Concatenate all pathways
+    # Concatenate all pathways and add more complex layers
     concatenated = Concatenate()([visual_path, auditory_path, tactile_path, stress_path])
-
-    # Output layer
-    output = Dense(1, activation='sigmoid')(concatenated)
+    dense_layer = Dense(50, activation='relu')(concatenated)
+    output = Dense(1, activation='sigmoid')(dense_layer)
 
     model = Model(inputs=[visual_input, auditory_input, tactile_input, stress_input], outputs=output)
     model.compile(optimizer='adam', loss='mean_squared_error')
@@ -60,16 +60,13 @@ priority_model = create_multisensory_model()
 
 def predict_priority(environmental_data):
     """Predict task priority using the neural network model."""
-    # Prepare the data as a list of individual numpy arrays, each with shape (1,1)
     data = [
-        np.array([[environmental_data['light']]]), 
-        np.array([[environmental_data['sound']]]), 
-        np.array([[environmental_data['touch']]]), 
-        np.array([[1.0 if environmental_data['stress'] == 'high' else 0.0]])  # Converting boolean to float
+        np.array([[environmental_data['light']]]),
+        np.array([[environmental_data['sound']]]),
+        np.array([[environmental_data['touch']]]),
+        np.array([[1.0 if environmental_data['stress'] == 'high' else 0.0]])
     ]
-    # The model expects inputs as a list of numpy arrays
     return priority_model.predict(data)[0][0]
-
 
 def add_tasks_to_queue(q, context):
     """Populate the priority queue with tasks based on the provided context and predicted priorities."""
