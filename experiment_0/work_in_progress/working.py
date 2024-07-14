@@ -53,10 +53,12 @@ class Agent:
     def __init__(self, name, x, y, start_energy=100):
         self.name = name
         self.position = np.array([x, y])
+        self.direction = np.array([1, 0])  # Initial direction (right)
         self.task_queue = queue.PriorityQueue()
         self.energy = start_energy
         self.memory = []
         self.alive = True
+        self.stress = 0
 
     def add_task(self, task):
         self.task_queue.put(task)
@@ -66,9 +68,9 @@ class Agent:
             _, task = self.task_queue.get()
             task.process()
 
-    def update(self):
+    def update(self, food_items, agents):
         if self.alive:
-            self.sense_environment()
+            self.sense_environment(food_items, agents)
             self.decide_next_action()
             self.process_tasks()
             if self.energy <= 0:
@@ -90,12 +92,50 @@ class Agent:
             self.energy -= 50
             print(f"{self.name} has reproduced.")
 
-    def sense_environment(self):
+    def sense_environment(self, food_items, agents):
+        self.vision(food_items)
+        self.hearing(agents)
+        self.touch(agents)
+
         data = get_real_time_data()
+        self.stress = data['stress']  # Update stress from environment
         priority = predict_priority(data)
         complexity = random.uniform(0.1, 0.5)
         task = Task("Sense Environment", priority, complexity, self.action, self)
         self.add_task(task)
+
+    def vision(self, food_items):
+        # Cone-shaped vision
+        vision_range = 50
+        vision_angle = np.pi / 4  # 45 degrees
+        for food in food_items:
+            direction_to_food = food.position - self.position
+            distance_to_food = np.linalg.norm(direction_to_food)
+            if distance_to_food < vision_range:
+                angle_to_food = np.arccos(np.dot(self.direction, direction_to_food) / (np.linalg.norm(self.direction) * distance_to_food))
+                if angle_to_food < vision_angle:
+                    self.energy += 10  # Eating food increases energy
+                    food_items.remove(food)
+                    print(f"{self.name} found food by vision and increased energy to {self.energy}")
+                    break
+
+    def hearing(self, agents):
+        # Circular hearing range
+        hearing_range = 100
+        for agent in agents:
+            if agent != self:
+                distance_to_agent = np.linalg.norm(self.position - agent.position)
+                if distance_to_agent < hearing_range:
+                    print(f"{self.name} hears {agent.name}")
+
+    def touch(self, agents):
+        # Direct contact
+        for agent in agents:
+            if agent != self:
+                distance_to_agent = np.linalg.norm(self.position - agent.position)
+                if distance_to_agent < AGENT_SIZE:
+                    print(f"{self.name} touches {agent.name}")
+                    self.stress += 10  # Increase stress when touched
 
     def decide_next_action(self):
         actions = [self.move, self.stay_put]
@@ -108,7 +148,7 @@ class Agent:
             action_names.append("Reproduce")
 
         for action, action_name in zip(actions, action_names):
-            priority = predict_priority(real_time_data)
+            priority = predict_priority(real_time_data) - self.stress  # Stress decreases priority
             complexity = random.uniform(0.5, 1.5)
             task = Task(action_name, priority, complexity, action, self)
             self.add_task(task)
@@ -265,7 +305,7 @@ def run_simulation():
 
         alive_agents = []
         for agent in all_agents:
-            agent.update()
+            agent.update(food_items, all_agents)
             if agent.alive:
                 agent.draw()
                 alive_agents.append(agent)
