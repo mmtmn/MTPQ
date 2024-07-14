@@ -29,8 +29,9 @@ const sf::Color FOOD_COLOR = sf::Color(0, 255, 0);
 constexpr int AGENT_SIZE = 10;
 constexpr int FOOD_SIZE = 5;
 constexpr int MATURITY_TIME = 10; // in seconds
-constexpr int MAX_AGE = 180; // in seconds
-constexpr int NUM_FOOD_ITEMS = 1000; // Number of food items to add
+constexpr int MAX_AGE = 100; // in seconds
+constexpr int INITIAL_FOOD_ITEMS = 10000; // Initial number of food items
+constexpr int MAX_FOOD_ITEMS = 2000; // Maximum number of food items in the environment
 
 mutex mtx;
 condition_variable cv;
@@ -47,7 +48,6 @@ struct Food {
         shape.setFillColor(FOOD_COLOR);
         shape.setPosition(position.x, position.y);
         window.draw(shape);
-        // cout << "Drawing food at position: " << position.x << ", " << position.y << endl; // Comment out for less verbosity
     }
 };
 
@@ -78,17 +78,19 @@ public:
     float stress = 0;
     time_point<steady_clock> birthTime;
     time_point<steady_clock> lastReproduceTime;
+    float speed; // Genetic trait
+    network<sequential> brain; // Neural network for decision making
 
-    Agent(string n, float x, float y, float e) : name(std::move(n)), position(x, y), direction(1, 0), energy(e) {
+    Agent(string n, float x, float y, float e, float s, const network<sequential>& parentBrain)
+        : name(std::move(n)), position(x, y), direction(1, 0), energy(e), speed(s), brain(parentBrain) {
         birthTime = steady_clock::now();
         lastReproduceTime = birthTime;
-        cout << "Agent " << name << " created at position (" << x << ", " << y << ") with energy " << e << endl; // Debug statement
+        cout << "Agent " << name << " created at position (" << x << ", " << y << ") with energy " << e << " and speed " << s << endl;
     }
-
 
     Agent(Agent&& other) noexcept 
         : name(std::move(other.name)), position(other.position), direction(other.direction), tasks(std::move(other.tasks)), 
-          energy(other.energy.load()), alive(other.alive), stress(other.stress), birthTime(other.birthTime), lastReproduceTime(other.lastReproduceTime) {}
+          energy(other.energy.load()), alive(other.alive), stress(other.stress), birthTime(other.birthTime), lastReproduceTime(other.lastReproduceTime), speed(other.speed), brain(std::move(other.brain)) {}
 
     Agent& operator=(Agent&& other) noexcept {
         if (this != &other) {
@@ -101,6 +103,8 @@ public:
             stress = other.stress;
             birthTime = other.birthTime;
             lastReproduceTime = other.lastReproduceTime;
+            speed = other.speed;
+            brain = std::move(other.brain);
         }
         return *this;
     }
@@ -148,21 +152,23 @@ public:
 
     void draw(RenderWindow& window) {
         CircleShape shape(AGENT_SIZE);
-        shape.setFillColor(AGENT_COLOR);
+        shape.setFillColor(alive ? AGENT_COLOR : sf::Color(100, 100, 100)); // Grey if dead
         shape.setPosition(position.x, position.y);
         window.draw(shape);
-        // cout << "Drawing agent " << name << " at position: " << position.x << ", " << position.y << endl; // Comment out for less verbosity
     }
 
     void moveAgent() {
         cout << "moveAgent called" << endl; // Debug statement
         random_device rd;
         mt19937 gen(rd());
-        uniform_int_distribution<> dist(-1, 1);
+        uniform_real_distribution<> dist(-1, 1);
         direction = sf::Vector2f(dist(gen), dist(gen));
-        position += direction;
-        position = sf::Vector2f(max(0.f, min(position.x, float(SCREEN_WIDTH))),
-                            max(0.f, min(position.y, float(SCREEN_HEIGHT))));
+        position += direction * speed;
+
+        // Boundary conditions
+        position.x = max(0.f, min(position.x, float(SCREEN_WIDTH - AGENT_SIZE)));
+        position.y = max(0.f, min(position.y, float(SCREEN_HEIGHT - AGENT_SIZE)));
+        
         cout << name << " moved to " << position.x << ", " << position.y << endl;
     }
 
@@ -184,26 +190,76 @@ public:
         if (age >= MATURITY_TIME && timeSinceLastReproduce >= MATURITY_TIME && energy > 50) {
             cout << "Conditions met for reproduction" << endl;
 
-            string childName = name + "_child";
-            float childX = position.x;
-            float childY = position.y;
-            float childEnergy = 50;
+            // Genetic algorithm: inherit speed with slight mutation
+            random_device rd;
+            mt19937 gen(rd());
+            uniform_real_distribution<> mutationDist(-0.1, 0.1);
+            float childSpeed = speed + mutationDist(gen);
 
-            cout << "Creating new agent with name: " << childName << ", position: (" << childX << ", " << childY << "), energy: " << childEnergy << endl;
-
-            try {
-                agents.push_back(Agent(childName, childX, childY, childEnergy));
-                cout << "New agent added" << endl;
-            } catch (const std::exception& e) {
-                cout << "Exception in reproduce: " << e.what() << endl;
-            } catch (...) {
-                cout << "Unknown exception in reproduce" << endl;
+            // Mutate the neural network slightly
+            network<sequential> childBrain = brain;
+            for (auto& layer : childBrain) {
+                for (auto& weight_vec : layer->weights()) {
+                    for (auto& weight : *weight_vec) {
+                        normal_distribution<float> mutation(0.0, 0.1);
+                        weight += mutation(gen);
+                    }
+                }
             }
 
-            float currentEnergy = energy.load();
-            energy.store(currentEnergy - 50);
-            lastReproduceTime = now;
-            cout << name << " has reproduced." << endl;
+            string childName = name + "_child";
+            float childX, childY;
+            bool spaceFound = false;
+            uniform_int_distribution<> offsetDist(-2 * AGENT_SIZE, 2 * AGENT_SIZE);
+
+            // Find a suitable position for the child
+            for (int attempts = 0; attempts < 10; ++attempts) {
+                float offsetX = offsetDist(gen);
+                float offsetY = offsetDist(gen);
+                childX = position.x + offsetX;
+                childY = position.y + offsetY;
+
+                // Ensure the child is within boundaries
+                childX = max(0.f, min(childX, float(SCREEN_WIDTH - AGENT_SIZE)));
+                childY = max(0.f, min(childY, float(SCREEN_HEIGHT - AGENT_SIZE)));
+
+                // Check if the space is occupied by another agent
+                bool overlap = false;
+                for (const auto& agent : agents) {
+                    float distance = sqrt((childX - agent.position.x) * (childX - agent.position.x) +
+                                        (childY - agent.position.y) * (childY - agent.position.y));
+                    if (distance < AGENT_SIZE * 2) {
+                        overlap = true;
+                        break;
+                    }
+                }
+
+                if (!overlap) {
+                    spaceFound = true;
+                    break;
+                }
+            }
+
+            if (spaceFound) {
+                float childEnergy = 50;
+                cout << "Creating new agent with name: " << childName << ", position: (" << childX << ", " << childY << "), energy: " << childEnergy << ", speed: " << childSpeed << endl;
+
+                try {
+                    agents.push_back(Agent(childName, childX, childY, childEnergy, childSpeed, childBrain));
+                    cout << "New agent added" << endl;
+                } catch (const std::exception& e) {
+                    cout << "Exception in reproduce: " << e.what() << endl;
+                } catch (...) {
+                    cout << "Unknown exception in reproduce" << endl;
+                }
+
+                float currentEnergy = energy.load();
+                energy.store(currentEnergy - 50);
+                lastReproduceTime = now;
+                cout << name << " has reproduced." << endl;
+            } else {
+                cout << "No suitable space found for new agent." << endl;
+            }
         } else {
             if (age < MATURITY_TIME) {
                 cout << "Agent not mature enough to reproduce." << endl;
@@ -217,28 +273,23 @@ public:
         }
     }
 
-    void senseEnvironment(const vector<Food>& foods, const vector<Agent>& agents) {
-        vision(foods);
+    void senseEnvironment(vector<Food>& foods, const vector<Agent>& agents) {
+        touchFood(foods);
         hearing(agents);
-        touch(agents);
+        touchAgents(agents);
     }
 
-    void vision(const vector<Food>& foods) {
-        cout << "vision called" << endl; // Debug statement
-        float visionRange = 50;
-        float visionAngle = M_PI / 4;
-        for (const auto& food : foods) {
-            sf::Vector2f toFood = food.position - position;
-            float distance = sqrt(toFood.x * toFood.x + toFood.y * toFood.y);
-            if (distance < visionRange) {
-                float angle = acos((direction.x * toFood.x + direction.y * toFood.y) /
-                                   (sqrt(direction.x * direction.x + direction.y * direction.y) * distance));
-                if (angle < visionAngle) {
-                    float currentEnergy = energy.load();
-                    energy.store(currentEnergy + 10);
-                    cout << name << " found food by vision and increased energy to " << energy << endl;
-                    break;
-                }
+    void touchFood(vector<Food>& foods) {
+        cout << "touchFood called" << endl; // Debug statement
+        for (auto it = foods.begin(); it != foods.end(); ++it) {
+            float distance = sqrt((position.x - it->position.x) * (position.x - it->position.x) +
+                                  (position.y - it->position.y) * (position.y - it->position.y));
+            if (distance < AGENT_SIZE) {
+                float currentEnergy = energy.load();
+                energy.store(currentEnergy + 10);
+                cout << name << " touched food and increased energy to " << energy << endl;
+                foods.erase(it); // Remove food once collected
+                break;
             }
         }
     }
@@ -257,15 +308,18 @@ public:
         }
     }
 
-    void touch(const vector<Agent>& agents) {
-        cout << "touch called" << endl; // Debug statement
+    void touchAgents(const vector<Agent>& agents) {
+        cout << "touchAgents called" << endl; // Debug statement
         for (const auto& agent : agents) {
             if (this != &agent) {
                 float distance = sqrt((position.x - agent.position.x) * (position.x - agent.position.x) +
                                       (position.y - agent.position.y) * (position.y - agent.position.y));
-                if (distance < AGENT_SIZE) {
+                if (distance < AGENT_SIZE * 2) { // Adjust for agent size
                     cout << name << " touches " << agent.name << endl;
                     stress += 10;
+                    // Collision avoidance
+                    direction = -direction;
+                    position += direction * speed;
                 }
             }
         }
@@ -275,7 +329,7 @@ public:
         cout << "decideNextAction called" << endl; // Debug statement
         random_device rd;
         mt19937 gen(rd());
-        uniform_real_distribution<> dis(0.1, 0.5);
+        uniform_real_distribution<> dis(0.01, 0.05); // Lowered complexity cost
 
         vector<function<void()>> actions = {bind(&Agent::moveAgent, this), bind(&Agent::stayPut, this)};
         auto now = steady_clock::now();
@@ -290,21 +344,25 @@ public:
             addTask(Task("Action", priority, dis(gen), action));
         }
 
-        if (age >= MAX_AGE) {
+        if (age >= MAX_AGE || energy <= 0) {
             alive = false;
-            cout << name << " has reached maximum age and died." << endl;
+            cout << name << " has died due to energy depletion or old age." << endl;
         }
     }
 
-    void update(const vector<Food>& foods, vector<Agent>& agents, network<sequential>& net) {
+
+    void update(vector<Food>& foods, vector<Agent>& agents, network<sequential>& net) {
         if (alive) {
             cout << "Updating agent: " << name << endl;
             senseEnvironment(foods, agents);
             decideNextAction(agents, net);
             cout << "Processing tasks for agent: " << name << endl;
             processTasks();
+        } else {
+            cout << "Agent " << name << " is dead and will be removed." << endl;
         }
     }
+
 };
 
 network<sequential> setupNeuralNetwork() {
@@ -335,21 +393,32 @@ network<sequential> net;
 void initializeSimulation() {
     net = setupNeuralNetwork();
     agents.reserve(10000); // Preallocate space to avoid reallocation
-    agents.emplace_back("Agent1", 400, 300, 100);
+    agents.emplace_back("Agent1", 400, 300, 100, 1.0f, net);
 
-    // Generate random food items
+    // Generate initial food items
     random_device rd;
     mt19937 gen(rd());
     uniform_int_distribution<> disX(0, SCREEN_WIDTH);
     uniform_int_distribution<> disY(0, SCREEN_HEIGHT);
-    for (int i = 0; i < NUM_FOOD_ITEMS; ++i) {
+    for (int i = 0; i < INITIAL_FOOD_ITEMS; ++i) {
         foods.emplace_back(disX(gen), disY(gen));
     }
+}
 
-    // Comment out threading for now
-    // for (auto& agent : agents) {
-    //     agent.simulateLife();
-    // }
+void respawnFood() {
+    random_device rd;
+    mt19937 gen(rd());
+    uniform_int_distribution<> disX(0, SCREEN_WIDTH);
+    uniform_int_distribution<> disY(0, SCREEN_HEIGHT);
+
+    while (true) {
+        this_thread::sleep_for(chrono::seconds(1));
+        lock_guard<mutex> lock(mtx);
+        if (foods.size() < MAX_FOOD_ITEMS) {
+            foods.emplace_back(disX(gen), disY(gen));
+            cout << "Respawned food at new location" << endl;
+        }
+    }
 }
 
 void runSimulation() {
@@ -358,6 +427,8 @@ void runSimulation() {
 
     initializeSimulation();
     cout << "Simulation initialized" << endl;
+
+    thread foodRespawnThread(respawnFood);
 
     while (window.isOpen()) {
         Event event;
@@ -374,16 +445,24 @@ void runSimulation() {
 
         {
             lock_guard<mutex> lock(agentsMutex); // Lock the agents vector during the draw call
-            for (auto& agent : agents) {
-                cout << "Updating and drawing agent: " << agent.name << endl; // Debug statement
-                agent.update(foods, agents, net);
-                agent.draw(window);
+            auto it = agents.begin();
+            while (it != agents.end()) {
+                if (!it->alive) {
+                    it = agents.erase(it); // Remove dead agents
+                } else {
+                    cout << "Updating and drawing agent: " << it->name << endl; // Debug statement
+                    it->update(foods, agents, net);
+                    it->draw(window);
+                    ++it;
+                }
             }
         }
 
         window.display();
         cout << "Window updated and displayed" << endl;
     }
+
+    foodRespawnThread.join();
 }
 
 int main() {
