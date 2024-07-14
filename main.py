@@ -3,8 +3,8 @@ import queue
 import random
 import time
 import numpy as np
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import Dense, Input, Concatenate
 
 class Task:
     """A task class with name, priority, complexity, and influenced by environmental data."""
@@ -23,38 +23,53 @@ class Task:
         return self.priority < other.priority
 
 memory = {}
-sensory_data = {'light': 450}  # Example of sensory input data
+sensory_data = {'light': 450, 'sound': 300, 'touch': 150}  # Expanded sensory input data
 
 def get_real_time_data():
     """Simulate real-time sensory data."""
     light_level = np.random.normal(loc=500, scale=50)
+    sound_level = np.random.normal(loc=300, scale=50)
+    touch_pressure = np.random.normal(loc=150, scale=30)
     stress_level = np.random.choice(['high', 'medium', 'low'], p=[0.1, 0.3, 0.6])
-    return {'light': light_level, 'stress': stress_level}
+    return {'light': light_level, 'sound': sound_level, 'touch': touch_pressure, 'stress': stress_level}
 
-def create_priority_model():
-    """Create a neural network model to predict task priority based on environmental data."""
-    model = Sequential([
-        Dense(10, activation='relu', input_shape=(2,)),
-        Dense(10, activation='relu'),
-        Dense(1, activation='sigmoid')
-    ])
+def create_multisensory_model():
+    """Create a neural network model to predict task priority based on multiple sensory inputs."""
+    visual_input = Input(shape=(1,))
+    auditory_input = Input(shape=(1,))
+    tactile_input = Input(shape=(1,))
+    stress_input = Input(shape=(1,))
+
+    # Pathways for different inputs
+    visual_path = Dense(10, activation='relu')(visual_input)
+    auditory_path = Dense(10, activation='relu')(auditory_input)
+    tactile_path = Dense(10, activation='relu')(tactile_input)
+    stress_path = Dense(10, activation='relu')(stress_input)
+
+    # Concatenate all pathways
+    concatenated = Concatenate()([visual_path, auditory_path, tactile_path, stress_path])
+
+    # Output layer
+    output = Dense(1, activation='sigmoid')(concatenated)
+
+    model = Model(inputs=[visual_input, auditory_input, tactile_input, stress_input], outputs=output)
     model.compile(optimizer='adam', loss='mean_squared_error')
     return model
 
-priority_model = create_priority_model()
-
-def train_priority_model(model, data, labels):
-    """Train the neural network model."""
-    model.fit(data, labels, epochs=10, verbose=0)
-
-data = np.random.normal(size=(100, 2))
-labels = np.random.uniform(low=0, high=1, size=(100,))
-train_priority_model(priority_model, data, labels)
+priority_model = create_multisensory_model()
 
 def predict_priority(environmental_data):
     """Predict task priority using the neural network model."""
-    data = np.array([[environmental_data['light'], environmental_data['stress'] == 'high']])
+    # Prepare the data as a list of individual numpy arrays, each with shape (1,1)
+    data = [
+        np.array([[environmental_data['light']]]), 
+        np.array([[environmental_data['sound']]]), 
+        np.array([[environmental_data['touch']]]), 
+        np.array([[1.0 if environmental_data['stress'] == 'high' else 0.0]])  # Converting boolean to float
+    ]
+    # The model expects inputs as a list of numpy arrays
     return priority_model.predict(data)[0][0]
+
 
 def add_tasks_to_queue(q, context):
     """Populate the priority queue with tasks based on the provided context and predicted priorities."""
