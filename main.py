@@ -4,10 +4,10 @@ import random
 import time
 
 class Task:
-    """A task class with name, priority, and complexity attributes. Complexity affects processing time."""
+    """A task class with name, priority, complexity, and influenced by emotional states."""
     def __init__(self, name, priority, complexity):
         self.name = name
-        self.priority = priority
+        self.priority = self.emotional_influence(priority)
         self.complexity = complexity
 
     def process(self):
@@ -19,10 +19,17 @@ class Task:
         """Define a less-than method to compare tasks based on priority."""
         return self.priority < other.priority
 
+    @staticmethod
+    def emotional_influence(priority):
+        emotions = {'stress': 1.2, 'calm': 0.8}
+        current_emotion = 'stress'  # This could be dynamically determined
+        return priority * emotions[current_emotion]
+
 memory = {}
+sensory_data = {'light': 450}  # Example of sensory input data
 
 def add_tasks_to_queue(q, context):
-    """Populate the priority queue with tasks based on the provided context (e.g., 'high_stress')."""
+    """Populate the priority queue with tasks based on the provided context and sensory data."""
     if context == 'high_stress':
         num_tasks = 30
         complexities = [random.uniform(1, 3) for _ in range(num_tasks)]
@@ -64,6 +71,7 @@ def evaluate_strategy(num_workers, context):
     for thread in threads:
         thread.join()
     total_time = time.time() - start_time
+    reflect_on_performance(total_time)
     return total_time
 
 def genetic_algorithm(population, context, generations=10):
@@ -94,6 +102,12 @@ def genetic_algorithm(population, context, generations=10):
         population = next_gen
         print(f"Generation {generation + 1}: Best time {fitness_scores[0][0]} with {fitness_scores[0][1]} threads")
     return population
+
+def reflect_on_performance(total_time):
+    """Adjust strategies based on performance metrics."""
+    acceptable_threshold = 10  # Example threshold
+    if total_time > acceptable_threshold:
+        print("Performance below expectations, consider strategy adjustments.")
 
 # Initialize and run the genetic algorithm with a given context
 initial_population = [random.randint(1, 10) for _ in range(10)]
