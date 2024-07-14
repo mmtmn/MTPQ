@@ -13,6 +13,8 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <future>
+#include <map>
 
 using namespace std;
 using namespace sf;
@@ -23,14 +25,16 @@ using namespace std::chrono;
 
 constexpr int SCREEN_WIDTH = 800;
 constexpr int SCREEN_HEIGHT = 600;
-const sf::Color BACKGROUND_COLOR = sf::Color(255, 255, 255);
-const sf::Color AGENT_COLOR_BLUE = sf::Color(0, 0, 255);
-const sf::Color AGENT_COLOR_RED = sf::Color(255, 0, 0);
-const sf::Color AGENT_COLOR_GREEN = sf::Color(0, 255, 0);
+const sf::Color BLUE_AGENT_COLOR = sf::Color(0, 0, 255);
+const sf::Color RED_AGENT_COLOR = sf::Color(255, 0, 0);
+const sf::Color GREEN_AGENT_COLOR = sf::Color(0, 255, 0);
 const sf::Color FOOD_COLOR = sf::Color(112, 112, 112);
+const sf::Color BACKGROUND_COLOR = sf::Color::White;
 constexpr int AGENT_SIZE = 10;
 constexpr int FOOD_SIZE = 5;
-constexpr int MATURITY_TIME = 10; // in seconds
+constexpr int VISION_RANGE = 50;
+constexpr int HEARING_RANGE = 100;
+constexpr int MATURITY_TIME = 18; // in seconds
 constexpr int MAX_AGE = 100; // in seconds
 constexpr int INITIAL_FOOD_ITEMS = 10000; // Initial number of food items
 constexpr int MAX_FOOD_ITEMS = 2000; // Maximum number of food items in the environment
@@ -39,8 +43,6 @@ mutex mtx;
 condition_variable cv;
 priority_queue<pair<int, function<void()>>> taskQueue;
 mutex agentsMutex;
-
-enum AgentType { BLUE, RED, GREEN };
 
 struct Food {
     sf::Vector2f position;
@@ -68,10 +70,89 @@ struct Task {
     }
 };
 
-Vector4f getRealTimeData();
-float predictPriority(network<sequential>& net, const Vector4f& data);
+class ThreadPool {
+public:
+    ThreadPool(size_t threads);
+    ~ThreadPool();
 
-struct Agent {
+    template<class F>
+    auto enqueue(F&& f) -> std::future<typename std::result_of<F()>::type>;
+
+private:
+    vector<thread> workers;
+    queue<function<void()>> tasks;
+
+    mutex queue_mutex;
+    condition_variable condition;
+    atomic<bool> stop;
+};
+
+inline ThreadPool::ThreadPool(size_t threads) : stop(false) {
+    for(size_t i = 0; i < threads; ++i)
+        workers.emplace_back([this] {
+            for(;;) {
+                function<void()> task;
+                {
+                    unique_lock<mutex> lock(this->queue_mutex);
+                    this->condition.wait(lock, [this] { return this->stop.load() || !this->tasks.empty(); });
+                    if(this->stop.load() && this->tasks.empty())
+                        return;
+                    task = move(this->tasks.front());
+                    this->tasks.pop();
+                }
+                task();
+            }
+        });
+}
+
+template<class F>
+auto ThreadPool::enqueue(F&& f) -> std::future<typename std::result_of<F()>::type> {
+    using return_type = typename std::result_of<F()>::type;
+    auto task = make_shared<packaged_task<return_type()>>(forward<F>(f));
+    future<return_type> res = task->get_future();
+    {
+        unique_lock<mutex> lock(queue_mutex);
+        if(stop.load())
+            throw runtime_error("enqueue on stopped ThreadPool");
+        tasks.emplace([task](){ (*task)(); });
+    }
+    condition.notify_one();
+    return res;
+}
+
+inline ThreadPool::~ThreadPool() {
+    stop.store(true);
+    condition.notify_all();
+    for(thread &worker: workers)
+        worker.join();
+}
+
+enum AgentType { BLUE, RED, GREEN };
+
+network<sequential> setupNeuralNetwork() {
+    network<sequential> net;
+    net << fully_connected_layer(4, 20) << tanh_layer()
+        << fully_connected_layer(20, 1) << sigmoid_layer();
+    return net;
+}
+
+Vector4f getRealTimeData() {
+    random_device rd;
+    mt19937 gen(rd());
+    normal_distribution<> d_light(500, 50), d_sound(300, 50), d_touch(150, 30);
+    uniform_real_distribution<> stress(0, 1);
+    Vector4f data(d_light(gen), d_sound(gen), d_touch(gen), stress(gen));
+    return data;
+}
+
+float predictPriority(network<sequential>& net, const Vector4f& data) {
+    vec_t input = {data[0], data[1], data[2], data[3]};
+    return net.predict(input)[0];
+}
+
+
+class Agent {
+public:
     string name;
     sf::Vector2f position;
     sf::Vector2f direction;
@@ -83,33 +164,44 @@ struct Agent {
     time_point<steady_clock> lastReproduceTime;
     float speed; // Genetic trait
     network<sequential> brain; // Neural network for decision making
-    AgentType type; // Type of agent (BLUE, RED, GREEN)
+    int senseImportance[3] = {5, 5, 5}; // Importance of vision, hearing, and touch
+    ThreadPool* threadPool;
+    AgentType agentType;
+    sf::Color agentColor;
 
-    Agent(string n, float x, float y, float e, float s, const network<sequential>& parentBrain, AgentType t)
-        : name(std::move(n)), position(x, y), direction(1, 0), energy(e), speed(s), brain(parentBrain), type(t) {
+    Agent(string n, float x, float y, float e, float s, const network<sequential>& parentBrain, AgentType type, ThreadPool* tp)
+        : name(move(n)), position(x, y), direction(1, 0), energy(e), speed(s), brain(parentBrain), agentType(type), threadPool(tp) {
         birthTime = steady_clock::now();
         lastReproduceTime = birthTime;
+        switch (agentType) {
+            case BLUE: agentColor = BLUE_AGENT_COLOR; break;
+            case RED: agentColor = RED_AGENT_COLOR; break;
+            case GREEN: agentColor = GREEN_AGENT_COLOR; break;
+        }
         cout << "Agent " << name << " created at position (" << x << ", " << y << ") with energy " << e << " and speed " << s << endl;
     }
 
     Agent(Agent&& other) noexcept 
-        : name(std::move(other.name)), position(other.position), direction(other.direction), tasks(std::move(other.tasks)), 
-          energy(other.energy.load()), alive(other.alive), stress(other.stress), birthTime(other.birthTime), lastReproduceTime(other.lastReproduceTime), speed(other.speed), brain(std::move(other.brain)), type(other.type) {}
+        : name(move(other.name)), position(other.position), direction(other.direction), tasks(move(other.tasks)), 
+          energy(other.energy.load()), alive(other.alive), stress(other.stress), birthTime(other.birthTime), lastReproduceTime(other.lastReproduceTime), 
+          speed(other.speed), brain(move(other.brain)), threadPool(other.threadPool), agentType(other.agentType), agentColor(other.agentColor) {}
 
     Agent& operator=(Agent&& other) noexcept {
         if (this != &other) {
-            name = std::move(other.name);
+            name = move(other.name);
             position = other.position;
             direction = other.direction;
-            tasks = std::move(other.tasks);
+            tasks = move(other.tasks);
             energy.store(other.energy.load());
             alive = other.alive;
             stress = other.stress;
             birthTime = other.birthTime;
             lastReproduceTime = other.lastReproduceTime;
             speed = other.speed;
-            brain = std::move(other.brain);
-            type = other.type;
+            brain = move(other.brain);
+            threadPool = other.threadPool;
+            agentType = other.agentType;
+            agentColor = other.agentColor;
         }
         return *this;
     }
@@ -137,8 +229,6 @@ struct Agent {
                 cout << "Executing task: " << task.name << " with priority " << task.priority << endl;
                 try {
                     task.action();
-                    // Provide a small energy boost upon successful task completion
-                    energy.store(energy.load() + 1.0f);
                 } catch (const std::exception& e) {
                     cout << "Exception in task action: " << e.what() << endl;
                 } catch (...) {
@@ -148,7 +238,6 @@ struct Agent {
                 energy.store(currentEnergy - task.complexity);
             } else {
                 cout << "Not enough energy for task: " << task.name << endl;
-                alive = false; // Mark as dead due to energy depletion
             }
         }
     }
@@ -158,17 +247,23 @@ struct Agent {
         taskProcessor.detach();
     }
 
-    void draw(RenderWindow& window) {
+    void draw(RenderWindow& window, bool showRanges) {
         CircleShape shape(AGENT_SIZE);
-        if (type == BLUE) {
-            shape.setFillColor(alive ? AGENT_COLOR_BLUE : sf::Color(100, 100, 100)); // Grey if dead
-        } else if (type == RED) {
-            shape.setFillColor(alive ? AGENT_COLOR_RED : sf::Color(100, 100, 100)); // Grey if dead
-        } else if (type == GREEN) {
-            shape.setFillColor(alive ? AGENT_COLOR_GREEN : sf::Color(100, 100, 100)); // Grey if dead
-        }
+        shape.setFillColor(alive ? agentColor : sf::Color(100, 100, 100)); // Grey if dead
         shape.setPosition(position.x, position.y);
         window.draw(shape);
+
+        if (showRanges) {
+            CircleShape visionCircle(VISION_RANGE);
+            visionCircle.setFillColor(sf::Color(0, 0, 255, 50)); // Transparent blue for vision
+            visionCircle.setPosition(position.x - VISION_RANGE + AGENT_SIZE / 2, position.y - VISION_RANGE + AGENT_SIZE / 2);
+            window.draw(visionCircle);
+
+            CircleShape hearingCircle(HEARING_RANGE);
+            hearingCircle.setFillColor(sf::Color(0, 255, 0, 50)); // Transparent green for hearing
+            hearingCircle.setPosition(position.x - HEARING_RANGE + AGENT_SIZE / 2, position.y - HEARING_RANGE + AGENT_SIZE / 2);
+            window.draw(hearingCircle);
+        }
     }
 
     void moveAgent() {
@@ -259,7 +354,7 @@ struct Agent {
                 cout << "Creating new agent with name: " << childName << ", position: (" << childX << ", " << childY << "), energy: " << childEnergy << ", speed: " << childSpeed << endl;
 
                 try {
-                    agents.push_back(Agent(childName, childX, childY, childEnergy, childSpeed, childBrain, type));
+                    agents.push_back(Agent(childName, childX, childY, childEnergy, childSpeed, childBrain, agentType, threadPool));
                     cout << "New agent added" << endl;
                 } catch (const std::exception& e) {
                     cout << "Exception in reproduce: " << e.what() << endl;
@@ -287,9 +382,18 @@ struct Agent {
         }
     }
 
-    void senseEnvironment(vector<Food>& foods, vector<Agent>& agents) {
-        touchFood(foods);
-        touchAgents(agents);
+    void reward(float value) {
+        energy.store(energy.load() + value);
+        senseImportance[0] = min(10, senseImportance[0] + int(value / 10)); // Increase importance of vision
+        senseImportance[1] = min(10, senseImportance[1] + int(value / 10)); // Increase importance of hearing
+        senseImportance[2] = min(10, senseImportance[2] + int(value / 10)); // Increase importance of touch
+    }
+
+    void punish(float value) {
+        energy.store(energy.load() - value);
+        senseImportance[0] = max(0, senseImportance[0] - int(value / 10)); // Decrease importance of vision
+        senseImportance[1] = max(0, senseImportance[1] - int(value / 10)); // Decrease importance of hearing
+        senseImportance[2] = max(0, senseImportance[2] - int(value / 10)); // Decrease importance of touch
     }
 
     void touchFood(vector<Food>& foods) {
@@ -298,11 +402,25 @@ struct Agent {
             float distance = sqrt((position.x - it->position.x) * (position.x - it->position.x) +
                                   (position.y - it->position.y) * (position.y - it->position.y));
             if (distance < AGENT_SIZE) {
-                float currentEnergy = energy.load();
-                energy.store(currentEnergy + 10);
+                reward(10);
                 cout << name << " touched food and increased energy to " << energy << endl;
                 foods.erase(it); // Remove food once collected
-                break;
+            } else {
+               ++it; // Move to the next food item
+            }
+        }
+    }
+
+    void hearing(const vector<Agent>& agents) {
+        cout << "hearing called" << endl; // Debug statement
+        float hearingRange = 100;
+        for (const auto& agent : agents) {
+            if (this != &agent) {
+                float distance = sqrt((position.x - agent.position.x) * (position.x - agent.position.x) +
+                                      (position.y - agent.position.y) * (position.y - agent.position.y));
+                if (distance < hearingRange) {
+                    cout << name << " hears " << agent.name << endl;
+                }
             }
         }
     }
@@ -310,7 +428,7 @@ struct Agent {
     void touchAgents(vector<Agent>& agents) {
         cout << "touchAgents called" << endl; // Debug statement
         for (auto& agent : agents) {
-            if (this != &agent && agent.alive) {
+            if (this != &agent) {
                 float distance = sqrt((position.x - agent.position.x) * (position.x - agent.position.x) +
                                       (position.y - agent.position.y) * (position.y - agent.position.y));
                 if (distance < AGENT_SIZE * 2) { // Adjust for agent size
@@ -320,14 +438,44 @@ struct Agent {
                     direction = -direction;
                     position += direction * speed;
 
-                    // Eating logic
-                    if ((type == BLUE && agent.type == RED) ||
-                        (type == RED && agent.type == GREEN) ||
-                        (type == GREEN && agent.type == BLUE)) {
-                        cout << name << " eats " << agent.name << endl;
-                        energy.store(energy.load() + agent.energy.load());
+                    // Predation
+                    if ((agentType == BLUE && agent.agentType == RED) ||
+                        (agentType == RED && agent.agentType == GREEN) ||
+                        (agentType == GREEN && agent.agentType == BLUE)) {
+                        reward(agent.energy.load());
                         agent.alive = false;
+                        cout << name << " has eaten " << agent.name << " and increased energy to " << energy << endl;
                     }
+                }
+            }
+        }
+    }
+
+    void senseEnvironment(vector<Food>& foods, vector<Agent>& agents) {
+        future<void> visionFuture = threadPool->enqueue([this, &foods]() { vision(foods); });
+        future<void> hearingFuture = threadPool->enqueue([this, &agents]() { hearing(agents); });
+        future<void> touchFuture = threadPool->enqueue([this, &agents]() { touchAgents(agents); });
+
+        visionFuture.get();
+        hearingFuture.get();
+        touchFuture.get();
+    }
+
+    void vision(const vector<Food>& foods) {
+        cout << "vision called" << endl; // Debug statement
+        float visionRange = 50;
+        float visionAngle = M_PI / 4;
+        for (const auto& food : foods) {
+            sf::Vector2f toFood = food.position - position;
+            float distance = sqrt(toFood.x * toFood.x + toFood.y * toFood.y);
+            if (distance < visionRange) {
+                float angle = acos((direction.x * toFood.x + direction.y * toFood.y) /
+                                   (sqrt(direction.x * direction.x + direction.y * direction.y) * distance));
+                if (angle < visionAngle) {
+                    float currentEnergy = energy.load();
+                    energy.store(currentEnergy + 10);
+                    cout << name << " found food by vision and increased energy to " << energy << endl;
+                    break;
                 }
             }
         }
@@ -358,6 +506,7 @@ struct Agent {
         }
     }
 
+
     void update(vector<Food>& foods, vector<Agent>& agents, network<sequential>& net) {
         if (alive) {
             cout << "Updating agent: " << name << endl;
@@ -371,37 +520,18 @@ struct Agent {
     }
 };
 
-network<sequential> setupNeuralNetwork() {
-    network<sequential> net;
-    net << fully_connected_layer(4, 20) << tanh_layer()
-        << fully_connected_layer(20, 1) << sigmoid_layer();
-    return net;
-}
-
-Vector4f getRealTimeData() {
-    random_device rd;
-    mt19937 gen(rd());
-    normal_distribution<> d_light(500, 50), d_sound(300, 50), d_touch(150, 30);
-    uniform_real_distribution<> stress(0, 1);
-    Vector4f data(d_light(gen), d_sound(gen), d_touch(gen), stress(gen));
-    return data;
-}
-
-float predictPriority(network<sequential>& net, const Vector4f& data) {
-    vec_t input = {data[0], data[1], data[2], data[3]};
-    return net.predict(input)[0];
-}
-
 vector<Agent> agents;
 vector<Food> foods;
 network<sequential> net;
+ThreadPool threadPool(4);
+bool showRanges = false;
 
 void initializeSimulation() {
     net = setupNeuralNetwork();
     agents.reserve(10000); // Preallocate space to avoid reallocation
-    agents.emplace_back("BlueAgent1", 100, 100, 100, 1.0f, net, BLUE);
-    agents.emplace_back("RedAgent1", 200, 200, 100, 1.0f, net, RED);
-    agents.emplace_back("GreenAgent1", 300, 300, 100, 1.0f, net, GREEN);
+    agents.emplace_back("Agent1", 400, 300, 100, 1.0f, net, BLUE, &threadPool);
+    agents.emplace_back("Agent2", 200, 150, 100, 1.0f, net, RED, &threadPool);
+    agents.emplace_back("Agent3", 600, 450, 100, 1.0f, net, GREEN, &threadPool);
 
     // Generate initial food items
     random_device rd;
@@ -443,6 +573,9 @@ void runSimulation() {
         while (window.pollEvent(event)) {
             if (event.type == Event::Closed)
                 window.close();
+            else if (event.type == Event::KeyPressed && event.key.code == Keyboard::Space) {
+                showRanges = !showRanges; // Toggle range visibility
+            }
         }
 
         window.clear(BACKGROUND_COLOR);
@@ -460,7 +593,7 @@ void runSimulation() {
                 } else {
                     cout << "Updating and drawing agent: " << it->name << endl; // Debug statement
                     it->update(foods, agents, net);
-                    it->draw(window);
+                    it->draw(window, showRanges);
                     ++it;
                 }
             }
