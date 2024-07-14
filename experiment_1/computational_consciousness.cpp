@@ -214,11 +214,9 @@ struct Agent {
             network<sequential> childBrain = brain;
             for (auto& layer : childBrain) {
                 for (auto& weight_vec : layer->weights()) {
-                    for (size_t i = 0; i < weight_vec->size(); ++i) {
-                        if (i % 2 == 0) { // Mutate 50% of the weights
-                            normal_distribution<float> mutation(0.0, 0.1);
-                            (*weight_vec)[i] += mutation(gen);
-                        }
+                    for (auto& weight : *weight_vec) {
+                        normal_distribution<float> mutation(0.0, 0.1);
+                        weight += mutation(gen);
                     }
                 }
             }
@@ -243,7 +241,7 @@ struct Agent {
                 bool overlap = false;
                 for (const auto& agent : agents) {
                     float distance = sqrt((childX - agent.position.x) * (childX - agent.position.x) +
-                                          (childY - agent.position.y) * (childY - agent.position.y));
+                                        (childY - agent.position.y) * (childY - agent.position.y));
                     if (distance < AGENT_SIZE * 2) {
                         overlap = true;
                         break;
