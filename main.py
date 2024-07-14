@@ -2,12 +2,15 @@ import threading
 import queue
 import random
 import time
+import numpy as np
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
 
 class Task:
-    """A task class with name, priority, complexity, and influenced by emotional states."""
+    """A task class with name, priority, complexity, and influenced by environmental data."""
     def __init__(self, name, priority, complexity):
         self.name = name
-        self.priority = self.emotional_influence(priority)
+        self.priority = priority
         self.complexity = complexity
 
     def process(self):
@@ -19,28 +22,50 @@ class Task:
         """Define a less-than method to compare tasks based on priority."""
         return self.priority < other.priority
 
-    @staticmethod
-    def emotional_influence(priority):
-        emotions = {'stress': 1.2, 'calm': 0.8}
-        current_emotion = 'stress'  # This could be dynamically determined
-        return priority * emotions[current_emotion]
-
 memory = {}
 sensory_data = {'light': 450}  # Example of sensory input data
 
+def get_real_time_data():
+    """Simulate real-time sensory data."""
+    light_level = np.random.normal(loc=500, scale=50)
+    stress_level = np.random.choice(['high', 'medium', 'low'], p=[0.1, 0.3, 0.6])
+    return {'light': light_level, 'stress': stress_level}
+
+def create_priority_model():
+    """Create a neural network model to predict task priority based on environmental data."""
+    model = Sequential([
+        Dense(10, activation='relu', input_shape=(2,)),
+        Dense(10, activation='relu'),
+        Dense(1, activation='sigmoid')
+    ])
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    return model
+
+priority_model = create_priority_model()
+
+def train_priority_model(model, data, labels):
+    """Train the neural network model."""
+    model.fit(data, labels, epochs=10, verbose=0)
+
+data = np.random.normal(size=(100, 2))
+labels = np.random.uniform(low=0, high=1, size=(100,))
+train_priority_model(priority_model, data, labels)
+
+def predict_priority(environmental_data):
+    """Predict task priority using the neural network model."""
+    data = np.array([[environmental_data['light'], environmental_data['stress'] == 'high']])
+    return priority_model.predict(data)[0][0]
+
 def add_tasks_to_queue(q, context):
-    """Populate the priority queue with tasks based on the provided context and sensory data."""
-    if context == 'high_stress':
-        num_tasks = 30
-        complexities = [random.uniform(1, 3) for _ in range(num_tasks)]
-    else:
-        num_tasks = 15
-        complexities = [random.uniform(0.5, 1.5) for _ in range(num_tasks)]
+    """Populate the priority queue with tasks based on the provided context and predicted priorities."""
+    real_time_data = get_real_time_data()
+    num_tasks = 30 if context == 'high_stress' else 15
+    complexities = [random.uniform(1, 3) if context == 'high_stress' else random.uniform(0.5, 1.5) for _ in range(num_tasks)]
 
     for i in range(num_tasks):
-        priority = random.randint(1, 10)
+        predicted_priority = predict_priority(real_time_data) * 10  # Scale the priority
         complexity = complexities[i]
-        task = Task(f"Task-{i}", priority, complexity)
+        task = Task(f"Task-{i}", predicted_priority, complexity)
         q.put((task.priority, task))
 
 def process_tasks_from_queue(q):
@@ -51,7 +76,7 @@ def process_tasks_from_queue(q):
             if task.name in memory:
                 task.complexity *= 0.9  # Reduce complexity if task is remembered
             task.process()
-            memory[task.name] = 'processed'  # Store task in memory
+            memory[task.name] = 'processed'
             q.task_done()
         except queue.Empty:
             break
