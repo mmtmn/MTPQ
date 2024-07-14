@@ -1,0 +1,1 @@
+g++ -std=c++17 -o simulation computational_consciousness.cpp -I/usr/include/eigen3 -I/home/mmtmn/tiny-dnn -lsfml-graphics -lsfml-window -lsfml-system
