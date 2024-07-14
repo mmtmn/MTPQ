@@ -329,7 +329,7 @@ public:
         cout << "decideNextAction called" << endl; // Debug statement
         random_device rd;
         mt19937 gen(rd());
-        uniform_real_distribution<> dis(0.01, 0.05); // Lowered complexity cost
+        uniform_real_distribution<> dis(0.05, 0.025); // complexity cost
 
         vector<function<void()>> actions = {bind(&Agent::moveAgent, this), bind(&Agent::stayPut, this)};
         auto now = steady_clock::now();
