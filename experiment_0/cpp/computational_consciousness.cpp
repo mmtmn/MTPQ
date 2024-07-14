@@ -30,6 +30,7 @@ constexpr int AGENT_SIZE = 10;
 constexpr int FOOD_SIZE = 5;
 constexpr int MATURITY_TIME = 60; // in seconds
 constexpr int MAX_AGE = 180; // in seconds
+constexpr int NUM_FOOD_ITEMS = 1000; // Number of food items to add
 
 mutex mtx;
 condition_variable cv;
@@ -46,7 +47,7 @@ struct Food {
         shape.setFillColor(FOOD_COLOR);
         shape.setPosition(position.x, position.y);
         window.draw(shape);
-        cout << "Drawing food at position: " << position.x << ", " << position.y << endl;
+        // cout << "Drawing food at position: " << position.x << ", " << position.y << endl; // Comment out for less verbosity
     }
 };
 
@@ -148,7 +149,7 @@ public:
         shape.setFillColor(AGENT_COLOR);
         shape.setPosition(position.x, position.y);
         window.draw(shape);
-        cout << "Drawing agent " << name << " at position: " << position.x << ", " << position.y << endl;
+        // cout << "Drawing agent " << name << " at position: " << position.x << ", " << position.y << endl; // Comment out for less verbosity
     }
 
     void moveAgent() {
@@ -311,7 +312,15 @@ void initializeSimulation() {
     net = setupNeuralNetwork();
     agents.reserve(100); // Preallocate space to avoid reallocation
     agents.emplace_back("Agent1", 400, 300, 100);
-    foods.emplace_back(100, 100);
+
+    // Generate random food items
+    random_device rd;
+    mt19937 gen(rd());
+    uniform_int_distribution<> disX(0, SCREEN_WIDTH);
+    uniform_int_distribution<> disY(0, SCREEN_HEIGHT);
+    for (int i = 0; i < NUM_FOOD_ITEMS; ++i) {
+        foods.emplace_back(disX(gen), disY(gen));
+    }
 
     // Comment out threading for now
     // for (auto& agent : agents) {
