@@ -560,7 +560,7 @@ void respawnFood() {
 }
 
 void runSimulation() {
-    RenderWindow window(VideoMode(SCREEN_WIDTH, SCREEN_HEIGHT), "Agent-Based Simulation");
+    RenderWindow window(VideoMode(SCREEN_WIDTH, SCREEN_HEIGHT), "Multi Threaded Priority Queue Simulation");
     window.setFramerateLimit(60);
 
     initializeSimulation();
